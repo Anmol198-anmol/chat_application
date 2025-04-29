@@ -12,4 +12,8 @@ export enum ChatEventEnum {
   START_TYPING_EVENT = "startTyping",
   STOP_TYPING_EVENT = "stopTyping",
   UPLOAD_PROGRESS_EVENT = "uploadProgress",
+  MESSAGE_ACKNOWLEDGMENT_EVENT = "messageAcknowledgment",
+  MESSAGE_DELIVERED_EVENT = "messageDelivered",
+  MESSAGE_READ_EVENT = "messageRead",
+  MESSAGE_STATUS_UPDATE_EVENT = "messageStatusUpdate"
 }

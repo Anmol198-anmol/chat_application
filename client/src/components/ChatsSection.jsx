@@ -125,8 +125,53 @@ const MessageCont = ({ isOwnMessage, message }) => {
 
           <div className="flex items-center gap-1 text-xs text-slate-400 absolute bottom-0 right-1">
             <span className="text-[10px]">
-              {moment(message.createdAt).fromNow(true)} ago
+              {moment(message.createdAt).format('HH:mm')} • {
+                moment(message.createdAt).calendar(null, {
+                  sameDay: '[Today]',
+                  lastDay: '[Yesterday]',
+                  lastWeek: 'dddd',
+                  sameElse: 'MMM D'
+                })
+              }
             </span>
+            {isOwnMessage && (
+              <span className="ml-1">
+                {message.status === 'sending' && (
+                  <svg className="w-3 h-3 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                    <circle cx="12" cy="12" r="10" strokeWidth="2" />
+                  </svg>
+                )}
+                {message.status === 'sent' && (
+                  <svg className="w-3 h-3 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" />
+                  </svg>
+                )}
+                {message.status === 'delivered' && (
+                  <div className="relative w-3 h-3">
+                    {/* First checkmark */}
+                    <svg className="absolute w-3 h-3 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" />
+                    </svg>
+                    {/* Second checkmark (slightly offset) */}
+                    <svg className="absolute w-3 h-3 text-gray-400 translate-x-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" />
+                    </svg>
+                  </div>
+                )}
+                {message.status === 'read' && (
+                  <div className="relative w-3 h-3">
+                    {/* First checkmark */}
+                    <svg className="absolute w-3 h-3 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" />
+                    </svg>
+                    {/* Second checkmark (slightly offset) */}
+                    <svg className="absolute w-3 h-3 text-blue-500 translate-x-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" />
+                    </svg>
+                  </div>
+                )}
+              </span>
+            )}
           </div>
         </div>
         <div className={`mx-3 md:mx-0 ${isOwnMessage ? "order-1" : "order-2"}`}>
@@ -185,6 +230,7 @@ export default function ChatsSection() {
   const { user } = useAuth();
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState({});
+  const [largeFileWarningShown, setLargeFileWarningShown] = useState(false);
 
   const opponentParticipant = getOpponentParticipant(
     currentSelectedChat.current?.participants,
@@ -240,34 +286,80 @@ export default function ChatsSection() {
 
   const handleFileUpload = async (file) => {
     const formData = new FormData();
-    formData.append("file", file);
+    formData.append("attachments", file); // Changed to match backend field name
 
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
-      xhr.open("POST", "/api/upload", true);
+      // Use the correct API endpoint for message attachments
+      xhr.open("POST", `${import.meta.env.VITE_API_URL}/api/messages/${currentSelectedChat.current._id}`, true);
       xhr.setRequestHeader(
         "Authorization",
         `Bearer ${localStorage.getItem("token")}`
       );
 
+      // Track upload progress
       xhr.upload.onprogress = (event) => {
-        setUploadProgress((prevProgress) => ({
-          ...prevProgress,
-          [file.name]: Math.round((event.loaded / event.total) * 100),
-        }));
+        if (event.lengthComputable) {
+          const progress = Math.round((event.loaded / event.total) * 100);
+          setUploadProgress((prevProgress) => ({
+            ...prevProgress,
+            [file.name]: progress,
+          }));
+          
+          // Log progress for large files
+          if (file.size > 100 * 1024 * 1024 && progress % 10 === 0) {
+            console.log(`Uploading ${file.name}: ${progress}% complete`);
+          }
+        }
       };
 
       xhr.onload = () => {
-        if (xhr.status === 200) {
-          resolve(xhr.responseText);
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            const response = JSON.parse(xhr.responseText);
+            
+            // Check if the response contains a duplicate file indicator
+            if (response.isDuplicate) {
+              // Show a notification that the file was already uploaded before
+              console.log(`File ${file.name} was already uploaded before. Reusing existing file.`);
+              
+              // You could show a toast notification here
+              if (window.confirm) {
+                window.confirm(`File ${file.name} was already uploaded before. Reusing existing file to save bandwidth.`);
+              }
+            }
+            
+            setAttachments((prevAttachments) => [
+              ...prevAttachments,
+              { 
+                name: file.name,
+                size: file.size,
+                type: file.type
+              },
+            ]);
+            resolve(response);
+          } catch (error) {
+            console.error("Error parsing response:", error);
+            reject(new Error("Invalid response format"));
+          }
         } else {
-          reject(new Error("File upload failed"));
+          console.error("Upload failed with status:", xhr.status);
+          reject(new Error(`Upload failed: ${xhr.statusText}`));
         }
       };
 
       xhr.onerror = () => {
+        console.error("Network error during upload");
         reject(new Error("Network error"));
       };
+
+      xhr.ontimeout = () => {
+        console.error("Upload timed out");
+        reject(new Error("Upload timed out"));
+      };
+
+      // Set a longer timeout for large files (5 minutes)
+      xhr.timeout = 5 * 60 * 1000;
 
       xhr.send(formData);
     });
@@ -275,9 +367,38 @@ export default function ChatsSection() {
 
   const handleAttachFiles = async (files) => {
     setIsUploading(true);
+    
     try {
+      // Check for large files (over 1GB) and show warning
+      const largeFiles = Array.from(files).filter(file => file.size > 1024 * 1024 * 1024);
+      
+      if (largeFiles.length > 0 && !largeFileWarningShown) {
+        const totalSize = largeFiles.reduce((sum, file) => sum + file.size, 0);
+        const sizeInGB = (totalSize / (1024 * 1024 * 1024)).toFixed(2);
+        
+        const proceed = window.confirm(
+          `You're about to upload ${largeFiles.length} large file(s) totaling ${sizeInGB}GB. ` +
+          `This may take some time and the chat will show a progress indicator. Continue?`
+        );
+        
+        if (!proceed) {
+          setIsUploading(false);
+          return;
+        }
+        
+        setLargeFileWarningShown(true);
+      }
+      
       for (const file of files) {
+        // Initialize progress for this file
+        setUploadProgress((prevProgress) => ({
+          ...prevProgress,
+          [file.name]: 0,
+        }));
+        
         await handleFileUpload(file);
+        
+        // Mark as complete
         setUploadProgress((prevProgress) => ({
           ...prevProgress,
           [file.name]: 100,
@@ -365,13 +486,45 @@ export default function ChatsSection() {
           </div>
         ) : (
           <div>
-            {messages?.map((msg) => (
-              <MessageCont
-                key={msg._id}
-                isOwnMessage={msg.sender?._id === user?._id}
-                message={msg}
-              />
-            ))}
+            {messages?.reduce((result, msg, index, array) => {
+              // Add date separator if this is the first message or if the date is different from the previous message
+              const currentDate = moment(msg.createdAt).startOf('day');
+              const prevDate = index > 0 ? moment(array[index - 1].createdAt).startOf('day') : null;
+              
+              if (index === 0 || !currentDate.isSame(prevDate, 'day')) {
+                // Format the date
+                let dateDisplay;
+                if (currentDate.isSame(moment().startOf('day'))) {
+                  dateDisplay = 'Today';
+                } else if (currentDate.isSame(moment().subtract(1, 'days').startOf('day'))) {
+                  dateDisplay = 'Yesterday';
+                } else if (currentDate.isAfter(moment().subtract(7, 'days'))) {
+                  dateDisplay = currentDate.format('dddd'); // Day name
+                } else {
+                  dateDisplay = currentDate.format('MMMM D, YYYY'); // Full date
+                }
+                
+                // Add date separator
+                result.push(
+                  <div key={`date-${msg._id}`} className="flex justify-center my-4">
+                    <div className="bg-gray-200 dark:bg-gray-700 rounded-full px-3 py-1 text-xs text-gray-600 dark:text-gray-300">
+                      {dateDisplay}
+                    </div>
+                  </div>
+                );
+              }
+              
+              // Add the message
+              result.push(
+                <MessageCont
+                  key={msg._id}
+                  isOwnMessage={msg.sender?._id === user?._id}
+                  message={msg}
+                />
+              );
+              
+              return result;
+            }, [])}
             <div ref={scrollToBottomRef} />
           </div>
         )}

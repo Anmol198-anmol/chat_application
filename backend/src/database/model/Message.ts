@@ -2,6 +2,15 @@ import { Schema, Types, model } from "mongoose";
 
 export const DOCUMENT_NAME = "Message";
 
+// Define message status enum
+export enum MessageStatus {
+  SENDING = 'sending',
+  SENT = 'sent',
+  DELIVERED = 'delivered',
+  READ = 'read',
+  FAILED = 'failed'
+}
+
 export default interface Message {
   _id: Types.ObjectId;
   sender: Types.ObjectId;
@@ -15,6 +24,8 @@ export default interface Message {
     type?: string;     // MIME type
   }[];
   chat: Types.ObjectId;
+  status: MessageStatus; // Message delivery status
+  readBy: Types.ObjectId[]; // Users who have read the message
   createdAt: Date;
   updatedAt: Date;
 }
@@ -70,6 +81,16 @@ const schema = new Schema<Message>({
     ref: "Chat",
     required: true,
   },
+  status: {
+    type: String,
+    enum: Object.values(MessageStatus),
+    default: MessageStatus.SENDING,
+  },
+  readBy: [{
+    type: Schema.Types.ObjectId,
+    ref: "User",
+    default: [],
+  }],
   createdAt: {
     type: Schema.Types.Date,
     default: Date.now,

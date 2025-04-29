@@ -20,6 +20,7 @@ import {
 import { emitSocketEvent } from "../socket";
 import { ChatEventEnum } from "../constants";
 import Chat from "../database/model/Chat";
+import { MessageStatus } from "../database/model/Message";
 import { getFileUrl } from "./file.controller";
 
 export const getAllMessages = asyncHandler(
@@ -38,7 +39,7 @@ export const getAllMessages = asyncHandler(
     }
 
     // check for existance of current user in the chats
-    if (selectedChat.participants?.includes(currentUser?._id)) {
+    if (!selectedChat.participants?.some(id => id.toString() === currentUser?._id.toString())) {
       throw new AuthFailureError("you don't own the chat !");
     }
 
@@ -49,6 +50,37 @@ export const getAllMessages = asyncHandler(
 
     if (!messages) {
       throw new InternalError("error while retrieving messages");
+    }
+
+    // Mark messages as read when user opens the chat
+    await messageRepo.markMessagesAsRead(
+      new Types.ObjectId(chatId),
+      currentUser._id
+    );
+
+    // Emit socket event to notify sender that messages have been read
+    const unreadMessages = messages.filter(
+      (msg: any) => 
+        msg.sender._id.toString() !== currentUser._id.toString() && 
+        (!msg.readBy || !msg.readBy.includes(currentUser._id))
+    );
+
+    if (unreadMessages.length > 0) {
+      // Get unique sender IDs
+      const senderIds = [...new Set(unreadMessages.map((msg: any) => msg.sender._id.toString()))];
+      
+      // Notify each sender that their messages have been read
+      senderIds.forEach((senderId: string) => {
+        emitSocketEvent(
+          req,
+          senderId,
+          ChatEventEnum.MESSAGE_READ_EVENT,
+          {
+            chatId,
+            readBy: currentUser._id
+          }
+        );
+      });
     }
 
     return new SuccessResponse(
@@ -85,7 +117,14 @@ export const sendMessage = asyncHandler(
     }
 
     // Store files in GridFS instead of local filesystem
-    const attachmentFiles: { url: string; fileId: string; name: string; size: number; type: string }[] = [];
+    const attachmentFiles: { 
+      url: string; 
+      fileId: string; 
+      name: string; 
+      size: number; 
+      type: string;
+      isDuplicate?: boolean; // Add isDuplicate property
+    }[] = [];
 
     // Process each attachment file
     if (files.attachments && files.attachments.length > 0) {
@@ -103,7 +142,8 @@ export const sendMessage = asyncHandler(
         new Types.ObjectId(currentUserId),
         new Types.ObjectId(chatId),
         content || "",
-        pendingAttachments
+        pendingAttachments,
+        MessageStatus.SENDING // Set initial status to SENDING
       );
 
       // Get the structured pending message
@@ -134,22 +174,49 @@ export const sendMessage = asyncHandler(
       
       for (const attachment of files.attachments) {
         try {
-          // Upload file to GridFS
-          const fileId = await fileRepo.uploadFile(
-            attachment.buffer,
-            `${Date.now()}-${attachment.originalname.replace(/\s+/g, '-')}`,
-            attachment.mimetype,
-            new Types.ObjectId(currentUserId),
-            attachment.originalname
-          );
+          // With memory storage, the file is available as a buffer in attachment.buffer
+          if (!attachment.buffer) {
+            throw new Error(`No buffer available for file ${attachment.originalname}`);
+          }
           
-          // Add file info to attachments array
+          // Use the buffer directly for duplicate checking
+          const fileBuffer = attachment.buffer;
+          
+          // Check if this file already exists in the database
+          const existingFileId = await fileRepo.findDuplicateFile(fileBuffer);
+          let fileId;
+          
+          if (existingFileId) {
+            // File already exists, use the existing file ID
+            fileId = existingFileId;
+            console.log(`Duplicate file detected: ${attachment.originalname}. Using existing file ID: ${fileId}`);
+          } else {
+            // File doesn't exist, upload it directly from the buffer
+            // Create a readable stream from the buffer
+            const { Readable } = require('stream');
+            const fileStream = new Readable();
+            fileStream.push(fileBuffer);
+            fileStream.push(null); // Signal the end of the stream
+            
+            // Upload file to GridFS using streaming
+            fileId = await fileRepo.uploadFile(
+              fileBuffer, // Pass the buffer directly
+              `${Date.now()}-${attachment.originalname.replace(/\s+/g, '-')}`,
+              attachment.mimetype,
+              new Types.ObjectId(currentUserId),
+              attachment.originalname,
+              attachment.size // Pass the file size
+            );
+          }
+          
+          // Add file info to attachments array with duplicate indicator
           attachmentFiles.push({
             url: getFileUrl(fileId),
             fileId: fileId,
             name: attachment.originalname,
             size: attachment.size,
-            type: attachment.mimetype
+            type: attachment.mimetype,
+            isDuplicate: existingFileId ? true : false // Track if this was a duplicate file
           });
 
           // Update progress
@@ -177,12 +244,15 @@ export const sendMessage = asyncHandler(
         } catch (error) {
           // If an upload fails, continue with the others but log the error
           console.error(`Failed to upload file ${attachment.originalname}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+          
+          // No need to delete temporary files with memory storage
         }
       }
 
-      // Update the pending message with the actual file references
+      // Update the pending message with the actual file references and set status to SENT
       await messageRepo.updateMessage(pendingMessage._id, {
-        attachments: attachmentFiles
+        attachments: attachmentFiles,
+        status: MessageStatus.SENT
       });
 
       // Get the updated message
@@ -192,14 +262,16 @@ export const sendMessage = asyncHandler(
         throw new InternalError("Failed to update message with attachments");
       }
 
-      // Add completion status
+      // Add completion status and duplicate file indicators
       const finalMessage = {
         ...updatedMessage[0],
         uploadStatus: {
           inProgress: false,
           progress: files.attachments.length,
           total: files.attachments.length
-        }
+        },
+        // Add information about duplicate files if any were detected
+        duplicateFiles: attachmentFiles.filter(file => file.isDuplicate).map(file => file.name)
       };
 
       // Update the last message in the chat
@@ -219,9 +291,27 @@ export const sendMessage = asyncHandler(
         );
       });
 
+      // Add acknowledgment message for the sender
+      const acknowledgment = {
+        type: "acknowledgment",
+        message: "Message sent successfully",
+        duplicateFiles: attachmentFiles.filter(file => file.isDuplicate).map(file => file.name)
+      };
+
+      // Send acknowledgment only to the sender
+      emitSocketEvent(
+        req,
+        currentUserId.toString(), // Convert ObjectId to string
+        ChatEventEnum.MESSAGE_ACKNOWLEDGMENT_EVENT,
+        acknowledgment
+      );
+
       return new SuccessResponse(
         "Message sent successfully",
-        finalMessage
+        {
+          ...finalMessage,
+          acknowledgment
+        }
       ).send(res);
     } else {
       // No attachments, just send the message normally
@@ -229,7 +319,8 @@ export const sendMessage = asyncHandler(
         new Types.ObjectId(currentUserId),
         new Types.ObjectId(chatId),
         content || "",
-        []
+        [],
+        MessageStatus.SENT // Set status to SENT immediately for text-only messages
       );
 
       // Update the last message in the chat
@@ -361,5 +452,74 @@ export const deleteMessage = asyncHandler(
     });
 
     return new SuccessMsgResponse("message deleted successfully").send(res);
+  }
+);
+
+// Mark messages as read
+export const markMessagesAsReadHandler = asyncHandler(
+  async (req: ProtectedRequest, res: Response) => {
+    const { chatId } = req.params;
+    const currentUser = req.user;
+
+    if (!chatId) {
+      throw new BadRequestError("Chat ID is required");
+    }
+
+    // Check if the chat exists and user is a participant
+    const selectedChat = await chatRepo.getChatByChatId(
+      new Types.ObjectId(chatId)
+    );
+
+    if (!selectedChat) {
+      throw new NotFoundError("Chat not found");
+    }
+
+    if (!selectedChat.participants?.some(id => id.toString() === currentUser?._id.toString())) {
+      throw new AuthFailureError("You are not a participant in this chat");
+    }
+
+    // Mark messages as read
+    const updated = await messageRepo.markMessagesAsRead(
+      new Types.ObjectId(chatId),
+      currentUser._id
+    );
+
+    // Get all messages in the chat to find which ones were marked as read
+    const messages = await messageRepo.getAllMessagesAggregated(
+      new Types.ObjectId(chatId)
+    );
+
+    // Find messages that were just marked as read (those sent by others and now read by current user)
+    const readMessages = messages.filter(
+      (msg: any) => 
+        msg.sender._id.toString() !== currentUser._id.toString() && 
+        msg.readBy && msg.readBy.some((id: any) => id.toString() === currentUser._id.toString())
+    );
+
+    if (readMessages.length > 0) {
+      // Get unique sender IDs
+      const senderIds = [...new Set(readMessages.map((msg: any) => msg.sender._id.toString()))];
+      
+      // Notify each sender that their messages have been read
+      senderIds.forEach((senderId: string) => {
+        emitSocketEvent(
+          req,
+          senderId,
+          ChatEventEnum.MESSAGE_READ_EVENT,
+          {
+            chatId,
+            readBy: currentUser._id,
+            messageIds: readMessages
+              .filter((msg: any) => msg.sender._id.toString() === senderId)
+              .map((msg: any) => msg._id)
+          }
+        );
+      });
+    }
+
+    return new SuccessResponse(
+      "Messages marked as read",
+      { updated, readMessages: readMessages.length }
+    ).send(res);
   }
 );

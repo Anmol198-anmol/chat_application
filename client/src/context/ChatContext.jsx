@@ -15,6 +15,7 @@ import {
 } from "../api";
 import { requestHandler } from "../utils";
 import { useSocket } from "./SocketContext";
+import { useAuth } from "./AuthContext";
 
 const chatContext = createContext();
 
@@ -22,6 +23,7 @@ const chatContext = createContext();
 export const useChat = () => useContext(chatContext);
 
 export const ChatProvider = ({ children }) => {
+  const { user } = useAuth(); // Get the user from AuthContext
   const [isConnected, setIsConnected] = useState(false); // state to store the socket connection status
   const [searchedUsers, setSearchedUsers] = useState(null); // state to store the stored users
   const [openAddChat, setOpenAddChat] = useState(false); // state to display the AddChat modal
@@ -91,8 +93,31 @@ export const ChatProvider = ({ children }) => {
   const markMessagesAsRead = (chatId) => {
     if (!socket || !chatId) return;
 
-    // Emit event to server to mark messages as read
-    socket.emit(socketEvents.MESSAGE_READ_EVENT, { chatId });
+    // Call the API to mark messages as read
+    requestHandler(
+      async () => {
+        const response = await fetch(`${import.meta.env.VITE_API_URL}/api/messages/${chatId}/read`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${localStorage.getItem('token')}`
+          }
+        });
+        
+        if (!response.ok) {
+          throw new Error('Failed to mark messages as read');
+        }
+        
+        return await response.json();
+      },
+      null,
+      (data) => {
+        console.log('Messages marked as read:', data);
+      },
+      (error) => {
+        console.error('Error marking messages as read:', error);
+      }
+    );
   };
 
   // update last message of the current selected chat with new message
@@ -292,6 +317,55 @@ export const ChatProvider = ({ children }) => {
     ]);
   };
 
+  // Handle message acknowledgment events
+  const onMessageAcknowledgment = useCallback((acknowledgment) => {
+    // Show a notification for duplicate files if any
+    if (acknowledgment.duplicateFiles && acknowledgment.duplicateFiles.length > 0) {
+      const fileNames = acknowledgment.duplicateFiles.join(', ');
+      alert(`Duplicate files detected: ${fileNames}. These files were already in the system and have been reused to save bandwidth.`);
+    }
+  }, []);
+  
+  // Handle message read events
+  const onMessageRead = useCallback((data) => {
+    if (!data || !data.chatId || !data.readBy) return;
+    
+    // Update messages in the current chat if it's the one being read
+    if (currentSelectedChat.current?._id === data.chatId) {
+      setMessages((prevMessages) => 
+        prevMessages.map(msg => {
+          // If this message was sent by the current user and read by someone else
+          if (data.messageIds?.includes(msg._id) || 
+              (msg.sender._id === user._id && !data.messageIds)) {
+            return {
+              ...msg,
+              status: 'read',
+              readBy: [...(msg.readBy || []), data.readBy]
+            };
+          }
+          return msg;
+        })
+      );
+    }
+  }, [user._id]);
+  
+  // Handle message status update events
+  const onMessageStatusUpdate = useCallback((data) => {
+    if (!data || !data.messageId || !data.status) return;
+    
+    setMessages((prevMessages) => 
+      prevMessages.map(msg => {
+        if (msg._id === data.messageId) {
+          return {
+            ...msg,
+            status: data.status
+          };
+        }
+        return msg;
+      })
+    );
+  }, []);
+
   useEffect(() => {
     if (!socket) return;
 
@@ -303,6 +377,10 @@ export const ChatProvider = ({ children }) => {
     socket.on(socketEvents.MESSAGE_DELETE_EVENT, onMessageDeleted);
     socket.on(socketEvents.MESSAGE_READ_UPDATE_EVENT, onMessageReadUpdate);
     socket.on(socketEvents.UPLOAD_PROGRESS_EVENT, onUploadProgress);
+    socket.on(socketEvents.MESSAGE_ACKNOWLEDGMENT_EVENT, onMessageAcknowledgment);
+    socket.on(socketEvents.MESSAGE_READ_EVENT, onMessageRead);
+    socket.on(socketEvents.MESSAGE_STATUS_UPDATE_EVENT, onMessageStatusUpdate);
+    socket.on(socketEvents.MESSAGE_DELIVERED_EVENT, onMessageStatusUpdate);
 
     return () => {
       // remove all the listeners for the socket events
@@ -313,6 +391,10 @@ export const ChatProvider = ({ children }) => {
       socket.off(socketEvents.MESSAGE_DELETE_EVENT, onMessageDeleted);
       socket.off(socketEvents.MESSAGE_READ_UPDATE_EVENT, onMessageReadUpdate);
       socket.off(socketEvents.UPLOAD_PROGRESS_EVENT, onUploadProgress);
+      socket.off(socketEvents.MESSAGE_ACKNOWLEDGMENT_EVENT, onMessageAcknowledgment);
+      socket.off(socketEvents.MESSAGE_READ_EVENT, onMessageRead);
+      socket.off(socketEvents.MESSAGE_STATUS_UPDATE_EVENT, onMessageStatusUpdate);
+      socket.off(socketEvents.MESSAGE_DELIVERED_EVENT, onMessageStatusUpdate);
     };
   }, [
     socket,
@@ -321,6 +403,9 @@ export const ChatProvider = ({ children }) => {
     onMessageDeleted,
     onMessageReadUpdate,
     onUploadProgress,
+    onMessageAcknowledgment,
+    onMessageRead,
+    onMessageStatusUpdate,
     socketEvents,
   ]);
 

@@ -31,6 +31,11 @@ const socketEvents = {
   MESSAGE_DELETE_EVENT: "messageDeleted",
   MESSAGE_READ_EVENT: "messageRead",
   MESSAGE_READ_UPDATE_EVENT: "messageReadUpdate",
+  MESSAGE_UPDATED_EVENT: "messageUpdated",
+  UPLOAD_PROGRESS_EVENT: "uploadProgress",
+  MESSAGE_ACKNOWLEDGMENT_EVENT: "messageAcknowledgment",
+  MESSAGE_DELIVERED_EVENT: "messageDelivered",
+  MESSAGE_STATUS_UPDATE_EVENT: "messageStatusUpdate",
 };
 
 const SocketProvider = ({ children }) => {

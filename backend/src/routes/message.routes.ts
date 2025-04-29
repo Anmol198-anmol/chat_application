@@ -5,6 +5,7 @@ import { validate } from "../validators/validate";
 import {
   deleteMessage,
   getAllMessages,
+  markMessagesAsReadHandler,
   sendMessage,
 } from "../controllers/message.controller";
 import { messagesValidator } from "../validators/messages.validator";
@@ -26,6 +27,11 @@ router
     upload.fields([{ name: "attachments", maxCount: 5 }]),
     sendMessage
   );
+
+// Route to mark messages as read
+router
+  .route("/:chatId/read")
+  .post(mongoIdPathValidator("chatId"), validate, markMessagesAsReadHandler);
 
 router
   .route("/:messageId")
